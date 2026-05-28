@@ -54,6 +54,13 @@ export default function App() {
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isSeeding, setIsSeeding] = useState(false);
 
+  // Local Accounts and Guest Access state
+  const [authMethod, setAuthMethod] = useState<'local' | 'guest' | 'google'>('local');
+  const [localUsername, setLocalUsername] = useState('');
+  const [localPassword, setLocalPassword] = useState('');
+  const [isRegistering, setIsRegistering] = useState(false);
+  const [authFeedback, setAuthFeedback] = useState('');
+
   // Default target date selected is set to Saturday (May 30, 2026) to instantly display the peak stress workload wave
   const [selectedDate, setSelectedDate] = useState<string>('2026-05-30');
   const [currentTab, setCurrentTab] = useState<'planner' | 'focus'>('planner');
@@ -61,17 +68,58 @@ export default function App() {
   // Monitor auth changes and configure Firestore connection check
   useEffect(() => {
     testConnection();
+
+    // Recover local user session if exists
+    const activeLocal = localStorage.getItem('cognitive_active_local_user');
+    if (activeLocal) {
+      try {
+        setUser(JSON.parse(activeLocal));
+        setAuthLoading(false);
+        return;
+      } catch (e) {
+        console.error("Local session recovery error:", e);
+      }
+    }
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-      setUser(currentUser);
+      // Direct update only if no local accounts are saved
+      if (!localStorage.getItem('cognitive_active_local_user')) {
+        setUser(currentUser);
+      }
       setAuthLoading(false);
     });
     return () => unsubscribe();
   }, []);
 
-  // Sync tasks state to Firestore in real time based on active user
+  // Sync tasks state to Firestore or Local Storage in real time based on active user
   useEffect(() => {
     if (!user) {
       setTasks([]);
+      return;
+    }
+
+    if (user.isLocal || user.isGuest) {
+      // Sync local tasks
+      const localData = localStorage.getItem(`cognitive_tasks_${user.uid}`);
+      if (localData) {
+        try {
+          const parsed = JSON.parse(localData);
+          setTasks(parsed);
+        } catch (e) {
+          console.error("Failed to parse local tasks repo:", e);
+          setTasks([]);
+        }
+      } else {
+        // Pre-populate with typical demo stress wave tasks on first create
+        const initialWithUser = INITIAL_TASKS.map((t, idx) => ({
+          ...t,
+          id: `local-task-${idx}-${Date.now()}`,
+          ownerId: user.uid,
+          createdAt: { seconds: Math.floor(Date.now() / 1000) - idx * 3600 }
+        }));
+        setTasks(initialWithUser);
+        localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(initialWithUser));
+      }
       return;
     }
 
@@ -123,6 +171,22 @@ export default function App() {
   const handleSeedDemoTasks = async () => {
     if (!user) return;
     setIsSeeding(true);
+
+    if (user.isLocal || user.isGuest) {
+      setTimeout(() => {
+        const initialWithUser = INITIAL_TASKS.map((t, idx) => ({
+          ...t,
+          id: `local-task-${idx}-${Date.now()}`,
+          ownerId: user.uid,
+          createdAt: { seconds: Math.floor(Date.now() / 1000) - idx * 3600 }
+        }));
+        setTasks(initialWithUser);
+        localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(initialWithUser));
+        setIsSeeding(false);
+      }, 500);
+      return;
+    }
+
     try {
       const batch = writeBatch(db);
       INITIAL_TASKS.forEach((initialTask) => {
@@ -151,6 +215,22 @@ export default function App() {
 
   const handleAddTask = async (newTask: Omit<Task, 'id' | 'completed'>) => {
     if (!user) return;
+
+    if (user.isLocal || user.isGuest) {
+      const docId = `task-${Date.now()}`;
+      const createdTask: Task = {
+        ...newTask,
+        id: docId,
+        completed: false,
+        ownerId: user.uid,
+        createdAt: new Date().toISOString() as any,
+      };
+      const updated = [createdTask, ...tasks];
+      setTasks(updated);
+      localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(updated));
+      return;
+    }
+
     const docId = `task-${Date.now()}`;
     const docRef = doc(db, 'tasks', docId);
     try {
@@ -174,6 +254,24 @@ export default function App() {
 
   const handleAddParsedTasks = async (parsed: Task[]) => {
     if (!user) return;
+
+    if (user.isLocal || user.isGuest) {
+      const tasksToAdd: Task[] = parsed.map((t, idx) => ({
+        ...t,
+        id: `task-${Date.now()}-${idx}-${Math.floor(Math.random() * 1000)}`,
+        completed: false,
+        ownerId: user.uid,
+        createdAt: new Date().toISOString() as any,
+      }));
+      const updated = [...tasksToAdd, ...tasks];
+      setTasks(updated);
+      localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(updated));
+      if (tasksToAdd.length > 0) {
+        setSelectedDate(tasksToAdd[0].dueDate);
+      }
+      return;
+    }
+
     try {
       const batch = writeBatch(db);
       parsed.forEach((t) => {
@@ -205,6 +303,19 @@ export default function App() {
 
   const handleToggleCompleted = async (taskId: string) => {
     if (!user) return;
+
+    if (user.isLocal || user.isGuest) {
+      const updated = tasks.map((t) => {
+        if (t.id === taskId) {
+          return { ...t, completed: !t.completed };
+        }
+        return t;
+      });
+      setTasks(updated);
+      localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(updated));
+      return;
+    }
+
     const taskToToggle = tasks.find((t) => t.id === taskId);
     if (!taskToToggle) return;
     
@@ -221,6 +332,14 @@ export default function App() {
 
   const handleDeleteTask = async (taskId: string) => {
     if (!user) return;
+
+    if (user.isLocal || user.isGuest) {
+      const updated = tasks.filter((t) => t.id !== taskId);
+      setTasks(updated);
+      localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(updated));
+      return;
+    }
+
     const path = `tasks/${taskId}`;
     try {
       const docRef = doc(db, 'tasks', taskId);
@@ -232,6 +351,25 @@ export default function App() {
 
   const handleApplyOptimization = async (reschedules: { taskId: string; suggestedDate: string }[]) => {
     if (!user) return;
+
+    if (user.isLocal || user.isGuest) {
+      let updated: Task[] = [];
+      if (reschedules.length === 0) {
+        updated = tasks.map((t) => ({ ...t, suggestedDate: '' }));
+      } else {
+        const rescheduleMap = new Map(reschedules.map((r) => [r.taskId, r.suggestedDate]));
+        updated = tasks.map((t) => {
+          if (rescheduleMap.has(t.id)) {
+            return { ...t, suggestedDate: rescheduleMap.get(t.id)! };
+          }
+          return t;
+        });
+      }
+      setTasks(updated);
+      localStorage.setItem(`cognitive_tasks_${user.uid}`, JSON.stringify(updated));
+      return;
+    }
+
     try {
       const batch = writeBatch(db);
       
@@ -253,6 +391,91 @@ export default function App() {
       await batch.commit();
     } catch (error) {
       handleFirestoreError(error, OperationType.UPDATE, 'tasks/optimization');
+    }
+  };
+
+  // Local Accounts sign in handler
+  const handleLocalAuth = (e: React.FormEvent) => {
+    e.preventDefault();
+    setAuthFeedback('');
+
+    const trimmedUser = localUsername.trim();
+    if (!trimmedUser || !localPassword) {
+      setAuthFeedback('Please enter both username and password.');
+      return;
+    }
+
+    if (trimmedUser.length < 3) {
+      setAuthFeedback('Username must be at least 3 characters.');
+      return;
+    }
+
+    const accounts = JSON.parse(localStorage.getItem('cognitive_local_accounts') || '[]');
+    const userLower = trimmedUser.toLowerCase();
+
+    if (isRegistering) {
+      // Create Account (Sign up)
+      const exists = accounts.some((a: any) => a.username.toLowerCase() === userLower);
+      if (exists) {
+        setAuthFeedback('Username already exists. Please choose another username.');
+        return;
+      }
+
+      const newAccount = { username: trimmedUser, password: localPassword };
+      accounts.push(newAccount);
+      localStorage.setItem('cognitive_local_accounts', JSON.stringify(accounts));
+      
+      const loggedUser = {
+        uid: `local_${userLower}`,
+        displayName: trimmedUser,
+        email: `${trimmedUser}@local`,
+        isLocal: true,
+      };
+      localStorage.setItem('cognitive_active_local_user', JSON.stringify(loggedUser));
+      setUser(loggedUser);
+    } else {
+      // Sign In
+      const found = accounts.find((a: any) => a.username.toLowerCase() === userLower);
+      if (!found) {
+        setAuthFeedback("Username not found. Toggle 'Create Account' below to sign up!");
+        return;
+      }
+
+      if (found.password !== localPassword) {
+        setAuthFeedback('Incorrect password. Please try again.');
+        return;
+      }
+
+      const loggedUser = {
+        uid: `local_${userLower}`,
+        displayName: found.username,
+        email: `${found.username}@local`,
+        isLocal: true,
+      };
+      localStorage.setItem('cognitive_active_local_user', JSON.stringify(loggedUser));
+      setUser(loggedUser);
+    }
+  };
+
+  // Local Guest handler
+  const handleGuestAuth = () => {
+    const loggedUser = {
+      uid: 'guest',
+      displayName: 'Guest Student',
+      email: 'guest@localhost',
+      isGuest: true,
+    };
+    localStorage.setItem('cognitive_active_local_user', JSON.stringify(loggedUser));
+    setUser(loggedUser);
+  };
+
+  // Logout local or google
+  const handleLogout = () => {
+    localStorage.removeItem('cognitive_active_local_user');
+    if (user?.isLocal || user?.isGuest) {
+      setUser(null);
+    } else {
+      logoutUser();
     }
   };
 
@@ -303,53 +526,146 @@ export default function App() {
             <p className="text-xs text-blue-300/80">Intelligent Workload Balancing & Attention-Lock Dashboard</p>
           </div>
 
+          {/* Auth selection Tabs */}
+          <div className="grid grid-cols-3 bg-blue-950/80 border border-blue-500/15 rounded-xl p-1 text-center select-none">
+            <button
+              onClick={() => { setAuthMethod('local'); setAuthFeedback(''); }}
+              className={`py-2 text-[10px] sm:text-xs font-bold rounded-lg cursor-pointer transition-all ${
+                authMethod === 'local' ? 'bg-blue-600/90 text-white shadow' : 'text-slate-400 hover:text-slate-205'
+              }`}
+            >
+              Local Password
+            </button>
+            <button
+              onClick={() => { setAuthMethod('guest'); setAuthFeedback(''); }}
+              className={`py-2 text-[10px] sm:text-xs font-bold rounded-lg cursor-pointer transition-all ${
+                authMethod === 'guest' ? 'bg-blue-600/90 text-white shadow' : 'text-slate-400 hover:text-slate-205'
+              }`}
+            >
+              Guest (No Auth)
+            </button>
+            <button
+              onClick={() => { setAuthMethod('google'); setAuthFeedback(''); }}
+              className={`py-2 text-[10px] sm:text-xs font-bold rounded-lg cursor-pointer transition-all ${
+                authMethod === 'google' ? 'bg-blue-600/90 text-white shadow' : 'text-slate-400 hover:text-slate-205'
+              }`}
+            >
+              Google Cloud
+            </button>
+          </div>
+
+          <hr className="border-blue-500/10" />
+
+          {/* Render forms dynamically */}
+          {authMethod === 'local' && (
+            <form onSubmit={handleLocalAuth} className="space-y-4">
+              <span className="text-[10px] font-bold text-blue-400 uppercase tracking-wider block">Access with Local Accounts</span>
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold text-blue-300 block">Username</label>
+                <input
+                  type="text"
+                  required
+                  value={localUsername}
+                  onChange={(e) => setLocalUsername(e.target.value)}
+                  placeholder="e.g. student1"
+                  className="w-full bg-blue-950/60 border border-blue-500/20 px-3.5 py-2.5 rounded-xl text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+              <div className="space-y-1">
+                <label className="text-[10px] font-semibold text-blue-300 block">Password</label>
+                <input
+                  type="password"
+                  required
+                  value={localPassword}
+                  onChange={(e) => setLocalPassword(e.target.value)}
+                  placeholder="••••••••"
+                  className="w-full bg-blue-950/60 border border-blue-500/20 px-3.5 py-2.5 rounded-xl text-xs text-white focus:outline-none focus:ring-1 focus:ring-blue-400"
+                />
+              </div>
+
+              {authFeedback && (
+                <p className="text-[11px] text-rose-300 text-center font-medium bg-rose-950/30 border border-rose-500/20 py-2 rounded-xl px-3 animate-pulse">
+                  {authFeedback}
+                </p>
+              )}
+
+              <button
+                type="submit"
+                className="w-full bg-gradient-to-r from-blue-600 to-indigo-650 hover:from-blue-500 hover:to-indigo-600 border border-blue-400/30 text-white font-bold text-xs tracking-wider uppercase py-3.5 rounded-xl shadow-lg cursor-pointer transition-all"
+              >
+                {isRegistering ? 'Create Local Account & Log In' : 'Sign In with Local Password'}
+              </button>
+
+              <div className="text-center pt-1">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setIsRegistering(!isRegistering);
+                    setAuthFeedback('');
+                  }}
+                  className="text-[10px] text-blue-300 hover:text-blue-105 underline cursor-pointer"
+                >
+                  {isRegistering ? 'Already have a secure login? Sign In' : 'Need unique task separation? Click to Create Local Account'}
+                </button>
+              </div>
+            </form>
+          )}
+
+          {authMethod === 'guest' && (
+            <div className="space-y-4 py-2">
+              <span className="text-[10px] font-bold text-emerald-400 uppercase tracking-wider block">Bypass Authentication</span>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Log in as guest. Your study notes, focus interventions, scheduling timelines, and tasks will be stored securely inside your browser's persistent Local Database.
+              </p>
+              <button
+                onClick={handleGuestAuth}
+                className="w-full bg-gradient-to-r from-emerald-600 to-teal-650 hover:from-emerald-500 hover:to-teal-600 border border-emerald-400/30 text-white font-bold text-xs tracking-wider uppercase py-3.5 rounded-xl shadow-lg cursor-pointer transition-all"
+              >
+                Access Guest Workspace (1-Click)
+              </button>
+            </div>
+          )}
+
+          {authMethod === 'google' && (
+            <div className="space-y-4 pt-1">
+              <span className="text-[10px] font-bold text-indigo-400 uppercase tracking-wider block">Google Accounts Access</span>
+              <button
+                onClick={() => signInWithGoogle()}
+                className="cursor-pointer w-full bg-gradient-to-r from-blue-600 to-indigo-650 hover:from-blue-500 hover:to-indigo-600 text-white font-bold text-xs tracking-wider uppercase py-3.5 border border-blue-500/30 rounded-xl shadow-lg transition-all"
+              >
+                Sign In with Google Cloud
+              </button>
+              <p className="text-[10px] text-center text-slate-400 leading-relaxed">
+                Requires iframe-popup authorization support. If google sign-in fails or stays stuck inside AI Studio, choose Guest or Local Password above!
+              </p>
+            </div>
+          )}
+
           <hr className="border-blue-500/10" />
 
           {/* Secure details */}
-          <div className="space-y-4">
+          <div className="space-y-3.5">
             <h2 className="text-[10px] text-blue-400 font-bold tracking-widest uppercase mb-1">Architectural Pillars</h2>
 
             <div className="flex items-start gap-3">
-              <div className="mt-0.5 p-1 bg-blue-950/60 border border-blue-800/40 rounded">
+              <div className="mt-0.5 p-1 bg-blue-950/60 border border-blue-800/40 rounded shrink-0">
                 <Layers className="w-3.5 h-3.5 text-blue-400" />
               </div>
               <div>
                 <h3 className="text-xs font-bold text-blue-200">Workload Wave Modeler</h3>
-                <p className="text-[11px] text-slate-300 leading-relaxed">Models student mental fatigue, predicts upcoming stress waves, and details dynamic reschedule offset solutions.</p>
+                <p className="text-[10px] text-slate-300 leading-relaxed">Models mental load and details custom scheduling offset recommendations to keep stress levels balanced.</p>
               </div>
             </div>
 
             <div className="flex items-start gap-3">
-              <div className="mt-0.5 p-1 bg-blue-950/60 border border-blue-800/40 rounded">
+              <div className="mt-0.5 p-1 bg-blue-950/60 border border-blue-800/40 rounded shrink-0">
                 <Clock className="w-3.5 h-3.5 text-blue-400" />
               </div>
               <div>
-                <h3 className="text-xs font-bold text-blue-200">Attention Drifting Interceptor</h3>
-                <p className="text-[11px] text-slate-300 leading-relaxed">Provides interactive focus control timers fitted with screen-drifting simulations to recover study routines.</p>
+                <h3 className="text-xs font-bold text-blue-200">Focus & Interactivity Drifts</h3>
+                <p className="text-[10px] text-slate-300 leading-relaxed">Runs real-time attention-drifting loops and interactive breathing coaches to recover academic flow.</p>
               </div>
             </div>
-
-            <div className="flex items-start gap-3">
-              <div className="mt-0.5 p-1 bg-blue-950/60 border border-blue-800/40 rounded">
-                <ShieldCheck className="w-3.5 h-3.5 text-blue-400" />
-              </div>
-              <div>
-                <h3 className="text-xs font-bold text-blue-200">Isolated Cloud Accounts</h3>
-                <p className="text-[11px] text-slate-300 leading-relaxed">Secure sandbox environment where database records are bound uniquely to each person's logged-in identity.</p>
-              </div>
-            </div>
-          </div>
-
-          <div className="space-y-3 pt-2">
-            <button
-              onClick={() => signInWithGoogle()}
-              className="cursor-pointer w-full bg-gradient-to-r from-blue-600 to-indigo-650 hover:from-blue-500 hover:to-indigo-600 text-white font-bold text-xs tracking-wider uppercase py-3.5 border border-blue-500/30 rounded-xl shadow-lg transition-all transform hover:-translate-y-0.5 active:translate-y-0"
-            >
-              Sign In with Google
-            </button>
-            <p className="text-[10px] text-center text-slate-400 leading-relaxed">
-              Using credentials isolation. Log in securely to save, load, and balance schedules on your cloud workspace.
-            </p>
           </div>
         </div>
 
@@ -413,7 +729,7 @@ export default function App() {
                 </div>
               )}
               <button
-                onClick={() => logoutUser()}
+                onClick={handleLogout}
                 className="cursor-pointer p-2 rounded-xl text-slate-400 hover:text-rose-450 hover:bg-blue-950/50 border border-transparent hover:border-blue-500/20 transition-all"
                 title="Log Out Account"
               >
