@@ -1,0 +1,6 @@
+{
+  "name": "Adaptive Cognitive Study Manager",
+  "description": "An intelligent study assistant that balances cognitive load, predicts academic stress waves, and intercepts procrastination in real-time.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

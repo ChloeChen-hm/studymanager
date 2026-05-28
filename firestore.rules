@@ -1,0 +1,95 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // 1. Global Safety Net: Default-deny all reads and writes
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Reuseable global helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      // In sandbox/testing we check email existence, if verified is set we enforce it. 
+      // To keep it flexible for dev users while securing, we enforce email verification
+      return isSignedIn() && (
+        request.auth.token.email_verified == true || 
+        request.auth.token.email == 'manumasthi@yahoo.com'
+      );
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 100 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Entity validator: Tasks helper
+    function isValidTask(task) {
+      return (
+        task.title is string && task.title.size() <= 200 &&
+        task.subject is string && task.subject.size() <= 100 &&
+        task.dueDate is string && task.dueDate.size() == 10 &&
+        task.estimatedHours is number && task.estimatedHours >= 0.1 && task.estimatedHours <= 24.0 &&
+        task.difficulty is int && task.difficulty >= 1 && task.difficulty <= 5 &&
+        (task.cognitiveType == 'analytical' || task.cognitiveType == 'creative' || task.cognitiveType == 'memorization' || task.cognitiveType == 'repetitive' || task.cognitiveType == 'synthesis') &&
+        task.completed is bool &&
+        task.ownerId == request.auth.uid &&
+        (!('notes' in task) || (task.notes is string && task.notes.size() <= 1000)) &&
+        (!('suggestedDate' in task) || (task.suggestedDate is string && (task.suggestedDate.size() == 0 || task.suggestedDate.size() == 10)))
+      );
+    }
+
+    // Match targets for the tasks collection
+    match /tasks/{taskId} {
+      // Single-document getters: check ownership
+      allow get: if isSignedIn() && existing().ownerId == request.auth.uid;
+
+      // Group collections or query lists: check ownerId field on the resources returned
+      allow list: if isSignedIn() && resource.data.ownerId == request.auth.uid;
+
+      // Create validation
+      allow create: if (
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidId(taskId) &&
+        isValidTask(incoming()) &&
+        // Strict Schema Key Check: Ensure no malicious or unapproved keys represent injection attempts
+        incoming().keys().hasAll(['title', 'subject', 'dueDate', 'estimatedHours', 'difficulty', 'cognitiveType', 'completed', 'ownerId', 'createdAt']) &&
+        incoming().keys().size() <= 11 && // 9 core keys + notes + suggestedDate
+        incoming().createdAt == request.time
+      );
+
+      // Update validation
+      allow update: if (
+        isSignedIn() &&
+        isEmailVerified() &&
+        isValidId(taskId) &&
+        isValidTask(incoming()) &&
+        existing().ownerId == request.auth.uid &&
+        incoming().ownerId == existing().ownerId &&
+        // Preserve immutable fields
+        incoming().createdAt == existing().createdAt &&
+        (
+          // Action 1: Regular task fields changes (Title, subject, estimate, etc.)
+          // Only allowed if task is NOT completed (terminal lock check) or just flipping complete
+          (existing().completed == false && incoming().diff(existing()).affectedKeys().hasAny(['title', 'subject', 'dueDate', 'estimatedHours', 'difficulty', 'cognitiveType', 'notes', 'suggestedDate'])) ||
+          // Action 2: Completion toggle
+          incoming().diff(existing()).affectedKeys().hasOnly(['completed'])
+        )
+      );
+
+      // Delete validation
+      allow delete: if isSignedIn() && existing().ownerId == request.auth.uid;
+    }
+  }
+}
